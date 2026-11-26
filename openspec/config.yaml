@@ -1,0 +1,22 @@
+schema: spec-driven
+
+context: |
+  Energy Detective: household electricity analysis agent (AIoT course, Group 20).
+  Stage: proposal/design. No application, model training, or experiment exists yet.
+  Data: UCI Individual Household Electric Power Consumption (single French household, 2006-2010, minute level).
+  Core stance: the LLM interprets and coordinates; deterministic tools compute every number;
+  every answer is checked against recorded evidence before output.
+  Planned stack: one cloud LLM with structured tool calling (provider/model TBD), scikit-learn, Streamlit.
+  Source documents: DESIGN.md and docs/ (decisions, methods, proposed scheme, domain knowledge).
+
+rules:
+  proposal:
+    - Label every outcome as Expected; never state measured results that do not exist
+    - State what is out of scope (device control, scheduling optimisation, real savings claims)
+  specs:
+    - Every requirement uses SHALL and has at least one WHEN/THEN scenario
+    - Missing values are never treated as zero; sub-meter changes are never attributed to a single appliance
+  design:
+    - Record parameters as initial settings, not tuned conclusions
+  tasks:
+    - Map each task to a module number (1-8) from DESIGN.md

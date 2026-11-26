@@ -1,0 +1,606 @@
+% =====================================================================
+%  Energy Detective -- IEEE conference paper DRAFT (DIC4)
+%  Group 20 | https://github.com/lun-09-15/AIoT_Final_Proj
+%  Status: proposal stage. No system is implemented and no experiment
+%  has been run. Every outcome is labeled "Expected"/"planned"; result
+%  tables are placeholders (TBD). Do NOT fill in numbers before running.
+% =====================================================================
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{url}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc}
+
+\newcommand{\yes}{\checkmark}
+\newcommand{\part}{$\circ$}
+\newcommand{\no}{--}
+\newcommand{\tbd}{\textcolor{gray}{TBD}}
+
+\lstset{basicstyle=\ttfamily\scriptsize,breaklines=true,frame=single,
+        columns=fullflexible,xleftmargin=2pt,xrightmargin=2pt}
+
+\begin{document}
+
+\title{Energy Detective: An Evidence-Grounded LLM Agent
+for Household Electricity Analysis}
+
+% TODO: replace with real author names / affiliation / e-mail.
+% Specs: https://github.com/timeil0611/DIC4-Energy-Detective/tree/main/openspec
+\author{
+\IEEEauthorblockN{Author One, Author Two, Author Three}
+\IEEEauthorblockA{\textit{Group 20, AIoT Course}\\
+\textit{Department of Computer Science and Engineering}\\
+\textit{National Chung Hsing University}\\
+Taichung, Taiwan\\
+\{author1, author2, author3\}@example.edu}
+}
+
+\maketitle
+
+% ---------------------------------------------------------------------
+\begin{abstract}
+Large language model (LLM) agents make household electricity data
+accessible through natural language, but a fluent answer can still quote
+the wrong date, confuse power (kW) with energy (kWh), treat missing
+records as zero, or present a statistical deviation as an appliance
+fault. We present the design of \emph{Energy Detective}, a single-agent
+system for five household tasks---consumption lookup, period comparison,
+anomaly-candidate screening, next-hour forecasting, and evidence-based
+recommendations---built on the principle that \emph{the LLM interprets
+and coordinates, deterministic tools compute every number, and every
+answer is checked against recorded evidence before it is shown}. The
+design combines (i) guarded analytics tools with explicit unit,
+completeness, and no-look-ahead contracts, (ii) an evidence registry
+that links each number, chart, and recommendation to its data slice,
+method, and source, and (iii) an external response validator with a
+bounded budget of eight tool calls and one repair. Requirements are
+captured as a verifiable OpenSpec contract of 11 capabilities with
+SHALL/WHEN--THEN scenarios. We further specify a layered evaluation on
+the UCI single-household dataset: a forecasting comparison against two
+naive baselines, and a controlled ablation of the validator over 50
+frozen tasks $\times$ 2 conditions $\times$ 3 runs. This paper reports
+the design and evaluation protocol; implementation and experiments are
+ongoing, and all outcomes are stated as expected rather than measured.
+\end{abstract}
+
+\begin{IEEEkeywords}
+LLM agents, tool use, household energy, evidence traceability,
+response verification, spec-driven development
+\end{IEEEkeywords}
+
+% =====================================================================
+\section{Introduction}
+% =====================================================================
+
+Residential buildings account for roughly 70\% of building energy
+demand worldwide, and household energy use differs widely across
+climates, appliance stocks, and end uses~\cite{iea2025efficiency}.
+Field experiments show that giving households information about their
+consumption can change behavior: a randomized trial of real-time
+feedback in Dutch households reported a 2.2\% reduction in electricity
+use~\cite{boomsma2025feedback}, and a 24-week field experiment in
+student housing found that both social-comparison nudges and
+capability-building boosts improved consumption trends relative to a
+control group~\cite{paunov2026nudges}. These results motivate better
+ways for residents to \emph{understand} their data; they do not by
+themselves show that a given analysis tool saves energy.
+
+LLM agents are a natural interface for this need. Recent work equips
+agents with analysis tools, device context, and knowledge retrieval for
+building energy management~\cite{he2025contextaware}, or translates
+natural-language requests into appliance schedules via native tool
+calling~\cite{jonah2026agentic}. The same studies, however, report that
+correctness varies by task and that an agent's explanation and its
+executed actions must be checked separately.
+
+\textbf{Three classes of error.} We focus on the following question:
+\emph{how can a household-energy agent give answers whose numbers,
+time ranges, and units are correct, whose analyses and recommendations
+are traceable to actual data, and which disclose limits when the data
+cannot support a conclusion?} We identify three classes of error that a
+fluent answer can hide:
+\begin{enumerate}
+  \item \emph{Computational errors}: wrong date range, power reported
+        as energy, partial observations summed as a complete total,
+        or a percentage computed on a zero or incomplete baseline.
+  \item \emph{Over-inference}: treating an anomaly candidate as waste
+        or a fault, or attributing a sub-metered circuit's increase to a
+        single appliance---which aggregate metering cannot
+        support~\cite{hart1992nilm}.
+  \item \emph{Category confusion}: presenting a forecast as an
+        observation, or a hypothesis as an established cause.
+\end{enumerate}
+
+\textbf{Three lines of defense.} Energy Detective addresses these with
+(1) \emph{tool computation}: all quantities come from guarded tools,
+never from free-text arithmetic; (2) \emph{evidence recording}: every
+tool result is stored with its data version, replay time, interval,
+fields, quality status, method, and result ID; and (3) \emph{response
+checking}: before output, an external validator compares the draft's
+numbers, units, dates, directions, and citations with the recorded
+evidence and allows at most one repair.
+
+We do not claim that any of these elements is new on its own; our
+contribution is their integration for household electricity analysis
+and a protocol to test whether they help. The expected contributions
+are:
+\begin{itemize}
+  \item A domain-grounded agent design for five household-electricity
+        tasks with explicit tool contracts and inference boundaries
+        (Sections~\ref{sec:problem}--\ref{sec:methods}).
+  \item An evidence model that makes each answer auditable, and a
+        bounded validate-and-repair loop (Section~\ref{sec:design}).
+  \item A requirement specification written as a verifiable OpenSpec
+        contract that links each claim to testable scenarios
+        (Section~\ref{sec:openspec}).
+  \item A layered evaluation protocol separating forecasting accuracy,
+        task correctness, and evidence consistency
+        (Section~\ref{sec:eval}).
+\end{itemize}
+
+The evaluation is organized around three research questions:
+\textbf{RQ1}---Does a feature-based Random Forest forecast outperform
+persistence and daily-seasonal-naive baselines (MAE, RMSE)?
+\textbf{RQ2}---Does the agent complete the five task types with correct
+numbers, units, and time ranges?
+\textbf{RQ3}---With the LLM, tools, knowledge, and data held fixed,
+does adding the external validator and one repair increase evidence
+consistency and appropriate limitation handling, and at what cost in
+latency, tool calls, and unnecessary refusals?
+
+% =====================================================================
+\section{Related Work}
+% =====================================================================
+
+We organize prior work into four research lines (Table~\ref{tab:matrix}).
+
+\textbf{Energy feedback and behavior.} Real-time feedback reduced
+household electricity use in a randomized trial~\cite{boomsma2025feedback},
+and nudges and boosts both improved conservation trends in student
+housing, without a significant difference between
+them~\cite{paunov2026nudges}. At the system level, the IEA highlights
+demand flexibility as a source of efficiency and grid
+value~\cite{iea2025flexibility}. These studies evaluate behavioral
+outcomes, not the correctness of an analytical answer; delivering an
+answer, a resident acting on it, and measured savings must be validated
+separately.
+
+\textbf{Short-term load forecasting.} Boosting ensembles forecast
+next-hour residential load with site-dependent
+accuracy~\cite{muqtadir2025nowcasting}, and an industrial study of
+household energy estimation chose an interpretable custom tree over a
+more accurate Random Forest to balance error, transparency, and
+business consistency~\cite{beraud2024explainable}. Forecast error,
+however, does not measure whether a conversational recommendation is
+supported by evidence.
+
+\textbf{LLM agents for energy management.} He and
+Jazizadeh~\cite{he2025contextaware} build context-aware agents that
+combine data analysis, device interaction, and retrieval, reporting
+77\% accuracy on energy-analysis queries and 49\% on cost management,
+and noting the instability of generated analysis code. Jonah et
+al.~\cite{jonah2026agentic} find native tool interfaces more reliable
+than free-text parsing for scheduling, yet good average performance
+does not guarantee constraint satisfaction in conflict scenarios.
+
+\textbf{LLM tool use and reliability.} ReAct interleaves reasoning
+with actions~\cite{yao2023react}, and Toolformer learns when to call
+external tools~\cite{schick2023toolformer}. Hallucination remains a
+core failure mode of generation~\cite{ji2023hallucination}.
+Self-Refine improves outputs with self-generated
+feedback~\cite{madaan2023selfrefine}, while CRITIC grounds
+self-correction in tool-based verification~\cite{gou2024critic}. These
+methods are domain-agnostic and do not encode energy-specific
+contracts such as unit conversion, completeness, or sub-meter
+attribution limits.
+
+\textbf{Research gap.} Behavioral studies do not validate agent
+analysis, forecasting studies do not evaluate answer correctness, and
+energy agents show that computation, tool execution, and constraint
+compliance can fail. Generic verification methods lack domain rules.
+We therefore study, in a single-household replay setting, whether
+tool-computed numbers, an evidence registry, and a domain-aware
+external validator make answers traceable and appropriately bounded.
+
+\begin{table}[t]
+\centering
+\caption{Feature comparison across the four research lines
+(\yes: addressed; \part: partially; \no: not a stated focus).
+The last row describes \emph{planned} capabilities.}
+\label{tab:matrix}
+\setlength{\tabcolsep}{3pt}
+\footnotesize
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+Work & NL & Tool & Evid. & Ext. & Limit & House-\\
+     & interf. & comp. & trace & verif. & discl. & hold \\
+\midrule
+Feedback RCT~\cite{boomsma2025feedback}   & \no & \no & \no & \no & \no & \yes \\
+Nudge/boost~\cite{paunov2026nudges}       & \no & \no & \no & \no & \no & \yes \\
+Boosting STLF~\cite{muqtadir2025nowcasting} & \no & \no & \no & \no & \no & \yes \\
+Explainable est.~\cite{beraud2024explainable} & \no & \no & \part & \no & \no & \yes \\
+Context-aware agent~\cite{he2025contextaware} & \yes & \yes & \no & \no & \no & \yes \\
+Agentic HEMS~\cite{jonah2026agentic}      & \yes & \yes & \no & \part & \no & \yes \\
+ReAct~\cite{yao2023react}                 & \yes & \yes & \part & \no & \no & \no \\
+Self-Refine~\cite{madaan2023selfrefine}   & \yes & \no & \no & \part & \no & \no \\
+CRITIC~\cite{gou2024critic}               & \yes & \yes & \part & \yes & \no & \no \\
+\midrule
+\textbf{Ours (planned)}                   & \yes & \yes & \yes & \yes & \yes & \yes \\
+\bottomrule
+\end{tabular}
+\\[2pt]
+\raggedright\scriptsize
+NL interf.: natural-language interface; Tool comp.: numbers computed by
+tools; Evid. trace: per-claim evidence links; Ext. verif.: output
+checked by an external verifier; Limit discl.: explicit handling of
+insufficient data. % TODO(team): re-check each cell against the papers.
+\end{table}
+
+% =====================================================================
+\section{Problem Formulation and Design Principles}
+\label{sec:problem}
+% =====================================================================
+
+\textbf{Data.} We use the UCI Individual Household Electric Power
+Consumption dataset~\cite{hebrail2006uci}: minute-level records from a
+single household in France (2006--2010), including global active power
+(kW, one-minute average) and three sub-metered circuits (Wh per
+minute). Each sub-meter aggregates several appliances.
+
+\textbf{Historical replay.} The agent operates at a fixed replay
+boundary $h$ (an hour boundary on the original clock). Only records
+with timestamp $t<h$ are visible; relative terms such as ``today'' and
+``yesterday'' are interpreted with respect to $h$. The forecast target
+is the energy $y_h$ in $[h, h+1)$.
+
+\textbf{Energy and completeness.} For global active power $P_i$ (kW)
+and sub-meter energy $e_i$ (Wh) over minutes $i$ in an interval,
+\begin{equation}
+E_{\text{global}} = \sum_i \frac{P_i}{60}\ \text{kWh},\qquad
+E_{\text{sub}} = \frac{1}{1000}\sum_i e_i\ \text{kWh}.
+\end{equation}
+An hour is \emph{complete} only when all 60 distinct minutes hold valid,
+non-conflicting values. Missing values are never treated as zero and are
+not imputed; an incomplete interval yields a \texttt{PARTIAL\_OBSERVED}
+quantity with its coverage ratio. A percentage change is reported only
+for a complete, non-zero baseline.
+
+\textbf{Five core principles.} The design follows five principles
+derived from our domain analysis:
+(P1)~\emph{measurement definition}---power and energy are distinct;
+(P2)~\emph{data granularity}---sub-meters cannot identify individual
+appliances~\cite{hart1992nilm};
+(P3)~\emph{anomaly $\neq$ cause}---a deviation from history is a
+candidate for inspection, not a diagnosis;
+(P4)~\emph{no look-ahead}---data views, features, and model training
+cut-offs respect $h$;
+(P5)~\emph{effect requires separate validation}---claims of energy,
+cost, or carbon savings require intervention studies.
+
+% =====================================================================
+\section{System Design}
+\label{sec:design}
+% =====================================================================
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+  box/.style={draw,rounded corners=2pt,align=center,font=\scriptsize,
+              minimum height=7mm,inner sep=2pt,text width=21mm},
+  arr/.style={-{Stealth[length=1.6mm]},thin},
+  lab/.style={font=\tiny,fill=white,inner sep=1pt}]
+\node[box] (q) at (0,0)        {\textcircled{\tiny 1} Query \&\\replay setting};
+\node[box] (a) at (2.75,0)     {\textcircled{\tiny 2} Planning \&\\coordination agent};
+\node[box] (u) at (5.5,0)      {\textcircled{\tiny 8} Streamlit UI:\\answer, chart, limits};
+\node[box] (d) at (0,-1.35)    {\textcircled{\tiny 3} Data access\\\& quality check};
+\node[box] (t) at (2.75,-1.35) {\textcircled{\tiny 4} Analytics \&\\forecast tools};
+\node[box] (k) at (5.5,-1.35)  {\textcircled{\tiny 5} Energy\\knowledge base};
+\node[box] (e) at (2.75,-2.6)  {\textcircled{\tiny 6} Evidence\\registry};
+\node[box] (v) at (2.75,-3.85) {\textcircled{\tiny 7} Response \&\\evidence validator};
+\draw[arr] (q) -- (a);
+\draw[arr,dashed] (a) -- node[lab,above=2pt]{clarify} (u);
+\draw[arr] (a) -- (t);
+\draw[arr] (a.south west) -- (d.north east);
+\draw[arr] (a.south east) -- (k.north west);
+\draw[arr] (d) -- (t);
+\draw[arr] (t) -- (e);
+\draw[arr] (d.south) |- (e.west);
+\draw[arr] (k.south) |- (e.east);
+\draw[arr] (e) -- (v);
+\draw[arr] (v.east) -- (6.85,-3.85) |- node[lab,pos=0.25,right=1pt,align=left]{pass /\\partial /\\limited} (u.east);
+\draw[arr] (v.west) -- (-1.4,-3.85) |- node[lab,pos=0.25,left=1pt,align=right]{repair\\($\le$1)} (2.75,0.75) -- (a.north);
+\end{tikzpicture}}
+\caption{Architecture of Energy Detective (eight modules). Numbers are
+computed only by \textcircled{\tiny 3}/\textcircled{\tiny 4}; every
+result is logged in \textcircled{\tiny 6} and checked by
+\textcircled{\tiny 7} before display.}
+\label{fig:arch}
+\end{figure}
+
+Fig.~\ref{fig:arch} shows the eight modules. A single cloud LLM with
+structured tool calling (\textcircled{\tiny 2}) interprets the question,
+asks for clarification when the request is ambiguous, selects tools,
+and drafts the answer; it never computes quantities itself.
+
+\textbf{Tool contracts.} Table~\ref{tab:tools} lists the tools. Data
+checks are enforced in the tool layer rather than relying on the LLM:
+the agent cannot change $h$ or the read-only view, and every call
+returns a status (\emph{success}, \emph{partial}, \emph{insufficient},
+\emph{rejected}, or \emph{failed}) that is logged as evidence.
+
+\begin{table}[t]
+\centering
+\caption{Guarded tool contracts (design names).}
+\label{tab:tools}
+\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash\ttfamily\scriptsize}p{0.40\columnwidth}p{0.54\columnwidth}@{}}
+\toprule
+\normalfont\footnotesize Tool & Required output / precondition \\
+\midrule
+ReadHistoricalData & Records with $t<h$ only, raw units, quality status, data version \\
+SummarizeEnergy & kWh, coverage, completeness label, per-hour results \\
+ComparePeriods & Absolute difference; percentage only for a complete, non-zero baseline \\
+FlagAnomalyCandidates & Reference size, median, MAD, candidate flag, limitations \\
+ForecastNextHour & Model and feature cut-offs, target $[h,h{+}1)$, method, estimate \\
+RetrieveDomainKnowledge & Knowledge ID, rule, applicability limits, source; explicit ``no match'' \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Evidence registry.} Each record stores the data version, replay
+time, interval, fields, quality status, tool or model version,
+parameters, result value and unit, and a result ID. Draft sentences and
+charts must reference existing result IDs; the binder never attaches a
+plausible-looking citation to an unsupported claim. The model's
+internal reasoning is not treated as evidence.
+
+\textbf{Response validator.} The validator checks required fields,
+dates, units, numbers (tolerance 0.005 for two-decimal rounding plus a
+small floating-point epsilon), direction of change, chart IDs, and
+explicit boundary violations (e.g., attributing a sub-meter increase to
+one appliance). Free-text reasoning that rules cannot capture is left to
+human rating (Section~\ref{sec:eval}). Answers are labeled
+\texttt{ANSWER}, \texttt{CLARIFY}, \texttt{PARTIAL}, or
+\texttt{LIMITED}; these are statuses, not confidence scores.
+
+\textbf{Bounded control loop.} Algorithm~\ref{alg:agent} summarizes the
+loop. Each task allows at most eight agent-initiated tool calls (failed
+calls count) and one repair; neither budget resets. When the budget is
+exhausted or validation fails twice, a fixed-structure terminal reply
+reports only confirmed evidence and the reason for stopping, so an
+unchecked draft is never shown.
+
+\begin{algorithm}[t]
+\caption{Energy Detective agent loop}
+\label{alg:agent}
+\footnotesize
+\begin{algorithmic}[1]
+\Require query $Q$, replay time $h$, read-only view $V$
+\Ensure evidence-linked response $R$
+\State $C \gets \Call{FreezeContext}{h, V, \text{versions}}$
+\State $E \gets \emptyset$;\ $calls \gets 0$;\ $repairs \gets 0$
+\Loop
+  \State $A \gets \Call{PlanNextAction}{Q, C, E}$
+  \If{$A.\mathit{type}=\textsc{Clarify}$}
+     \State \Return \Call{RenderClarification}{A}
+  \ElsIf{$A.\mathit{type}=\textsc{Tool}$}
+     \If{$calls \ge 8$} \State \Return \Call{SafeTerminal}{E, \text{budget}} \EndIf
+     \State $calls \gets calls+1$
+     \State $T \gets \Call{ExecuteGuardedTool}{A, C}$;\ $E \gets E \cup \{T\}$
+  \ElsIf{$A.\mathit{type}=\textsc{Draft}$}
+     \State $D \gets \Call{BindDraftToEvidence}{A.\mathit{draft}, E}$
+     \State $r \gets \Call{ValidateResponse}{D, E, C}$
+     \If{$r.\mathit{pass}$} \State \Return \Call{Render}{D, E} \EndIf
+     \If{$repairs \ge 1$} \State \Return \Call{SafeTerminal}{E, \text{invalid}} \EndIf
+     \State $repairs \gets repairs+1$;\ $Q \gets Q \oplus r.\mathit{issues}$
+  \Else
+     \State \Return \Call{SafeTerminal}{E, \text{error}}
+  \EndIf
+\EndLoop
+\end{algorithmic}
+\end{algorithm}
+
+% =====================================================================
+\section{Analytics and Domain Knowledge}
+\label{sec:methods}
+% =====================================================================
+
+\textbf{Next-hour forecasting.} We compare a Random Forest
+regressor~\cite{pedregosa2011sklearn} (initial setting: 200 trees,
+max depth 12, min.\ 5 samples per leaf) against \emph{persistence}
+($\hat y_h = y_{h-1}$) and \emph{daily seasonal naive}
+($\hat y_h = y_{h-24}$). Features are lags $y_{h-1}, y_{h-2},
+y_{h-24}, y_{h-168}$; the mean and standard deviation of the last 3 and
+24 complete hours; and calendar features known at $h$. Splits are
+chronological (70/15/15) on the full time grid; the test period uses
+rolling one-step replay without re-tuning, and the model's training
+cut-off may never exceed $h$. These hyperparameters are a starting
+point, not tuned results.
+
+\textbf{Anomaly candidates.} For a target hour value $x$, the reference
+set contains complete readings at the same hour and day type
+(weekday/weekend) in the preceding 56 days, requiring at least 14
+samples. With median $m$ and $\mathrm{MAD}=\mathrm{median}(|x_i-m|)$,
+the modified z-score~\cite{iglewicz1993outliers,nist_outliers}
+\begin{equation}
+M = \frac{0.6745\,(x-m)}{\mathrm{MAD}}
+\end{equation}
+flags a candidate when $|M|>3.5$. If the reference is too small or
+$\mathrm{MAD}=0$, the tool returns a limitation instead of a score.
+Because the dataset has no fault or waste labels, we do not report
+detection accuracy; we instead report flag frequencies at thresholds
+2.5/3.5/4.5 as a sensitivity analysis.
+
+\textbf{Domain knowledge.} A small curated base of about ten entries
+(K01--K10) covers units, sub-meter granularity, missing data, comparison
+baselines, zero denominators, anomaly candidates, forecast limits, the
+difference between energy saving, cost saving, and peak shaving,
+behavioral effects, and generalization. Each entry records a
+definition, applicability conditions, what \emph{cannot} be inferred,
+and its source. Retrieval is concept/keyword based; an empty match is
+reported rather than fabricated.
+
+% =====================================================================
+\section{Spec-Driven Development with OpenSpec}
+\label{sec:openspec}
+% =====================================================================
+
+To turn design principles into verifiable requirements, we adopted
+OpenSpec~\cite{openspec}, a spec-driven development framework for AI
+coding assistants. The project configuration records the research
+context and writing rules (e.g., all outcomes must be labeled
+\emph{Expected}; no fabricated results). The design document was
+converted into one OpenSpec change consisting of a proposal,
+\textbf{11 capability specifications}, \textbf{9 design decisions}, and
+\textbf{32 implementation tasks}. Every requirement is phrased with
+SHALL and tested by WHEN/THEN scenarios, and the change passes OpenSpec's
+strict validation. The specification is public at
+\url{https://github.com/timeil0611/DIC4-Energy-Detective}. A traceability table maps each claim in this paper
+(principles P1--P5, the three trade-offs in Section~\ref{sec:disc}, and
+RQ1--RQ3) to at least one capability. An abridged excerpt from the \texttt{agent-orchestration} and \texttt{data-quality} specifications:
+
+\begin{lstlisting}
+### Requirement: Bounded tool budget
+The agent SHALL execute at most 8 agent-initiated
+tool calls per task, counting failed and rejected
+calls, and the budget SHALL NOT reset after a repair.
+
+#### Scenario: Budget exhausted
+- WHEN a task has used 8 tool calls and the agent
+  requests another tool
+- THEN the system returns a LIMITED reply built only
+  from recorded evidence
+
+### Requirement: Complete hour definition
+#### Scenario: 59 valid minutes
+- WHEN an hour has 59 valid minutes for the field
+- THEN the hour is labeled PARTIAL_OBSERVED with
+  coverage 59/60
+\end{lstlisting}
+
+These scenarios double as acceptance tests: during implementation and
+evaluation, each behavior can be checked directly against the
+specification rather than against prose.
+
+% =====================================================================
+\section{Evaluation Protocol}
+\label{sec:eval}
+% =====================================================================
+
+\textbf{RQ1: forecasting.} The three methods are compared on common
+test hours with complete targets, using MAE and RMSE (kWh), together
+with each method's availability rate and sample count. Excluded samples
+are reported with reasons.
+
+\textbf{RQ2/RQ3: agent tasks.} A pilot set of 10 tasks is used only to
+tune tool descriptions. The frozen formal set has 50 tasks: 10 per task
+type, of which 6 are regular and 4 are boundary cases (missing data,
+ambiguous time, unidentifiable appliance). Each task fixes its replay
+time, data view, and expected answer or expected clarification. Two
+conditions share the same LLM version, tools, knowledge, data, and
+prompts: \textbf{A}---no external validation; \textbf{B}---validator
+with at most one repair, under the same tool budget. Each task is run
+three times per condition ($50\times2\times3=300$ task executions; a
+task may involve several model calls).
+
+\textbf{Metrics.} Table~\ref{tab:metrics} lists the metrics. To avoid
+rewarding evasive answers, evidence consistency is always reported
+together with coverage, task completion, and the unnecessary-refusal
+rate on regular tasks. Two team members independently rate
+recommendations on evidence support, inference boundary, and
+actionability (0--2 each) and report initial agreement; LLM
+self-assessment is not used as the sole judge.
+
+\begin{table}[t]
+\centering
+\caption{Planned metrics and result placeholders (no experiment has
+been run; all cells are TBD).}
+\label{tab:metrics}
+\footnotesize
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Metric & Cond.\ A & Cond.\ B \\
+\midrule
+Task completion rate (50 tasks)          & \tbd & \tbd \\
+Number / unit / time correctness         & \tbd & \tbd \\
+Evidence consistency                     & \tbd & \tbd \\
+Correct limitation handling (20 boundary)& \tbd & \tbd \\
+Unnecessary refusal (30 regular)         & \tbd & \tbd \\
+Recommendation score (0--6, human)       & \tbd & \tbd \\
+Latency / tool calls / repairs per task  & \tbd & \tbd \\
+\midrule
+\multicolumn{3}{@{}l}{RQ1: MAE / RMSE (kWh) of RF, persistence,
+seasonal naive: \tbd} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We pre-register no expected improvement. If condition B does not
+improve, is slower, or refuses more often, this will be reported and
+analyzed, and all runs---not only the best---will be reported.
+
+% =====================================================================
+\section{Discussion: Trade-offs and Limitations}
+\label{sec:disc}
+% =====================================================================
+
+\textbf{Three design trade-offs.}
+(i)~\emph{Social comparison vs.\ concrete guidance}: comparative
+feedback can motivate, but a single-household dataset offers no peer
+group, so we provide concrete, evidence-linked inspection suggestions
+instead~\cite{paunov2026nudges}.
+(ii)~\emph{Forecast accuracy vs.\ transparency}: a Random Forest may be
+more accurate than naive baselines but less transparent; industry
+practice sometimes favors interpretable models~\cite{beraud2024explainable},
+so baselines are always reported alongside the model.
+(iii)~\emph{LLM autonomy vs.\ deterministic checking}: more autonomy
+can improve flexibility but makes errors harder to audit; we constrain
+computation to tools and add rule-based checks, accepting extra latency
+that RQ3 will quantify.
+
+\textbf{Limitations.} A single, older French household does not
+represent other households or Taiwan; the data lack appliance-level
+activity, weather, and applicable tariffs; there are no ground-truth
+fault labels, so anomalies remain candidates; rule-based checks cannot
+judge all free-text reasoning; thresholds and budgets are not yet
+validated on this data; and cloud LLM versions may affect
+reproducibility. Without adoption and before/after measurements, we
+make no claim of energy, cost, or carbon savings.
+
+% =====================================================================
+\section{Conclusion}
+% =====================================================================
+
+We presented the design of Energy Detective, an LLM agent for
+household electricity analysis in which the LLM coordinates,
+deterministic tools compute, and an external validator checks every
+answer against recorded evidence. The requirements are captured as an
+OpenSpec contract with testable scenarios, and a controlled evaluation
+protocol is specified. Next steps are to implement the data and
+analytics tools, select and pin a cloud LLM, build the validator and
+Streamlit interface, run the pilot, freeze the formal task set, and
+report results for RQ1--RQ3.
+
+% ---------------------------------------------------------------------
+\section*{Acknowledgment}
+% TODO: course / instructor acknowledgment if required.
+This draft was prepared with AI assistance (MCP-connected coding
+assistant) for drafting and specification; all design decisions and
+sources were reviewed by the authors.
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}

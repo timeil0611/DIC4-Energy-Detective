@@ -8,6 +8,21 @@ Energy Detective 希望讓一般家庭使用者透過自然語言理解用電紀
 
 > **開發狀態：**目前已整理研究背景、系統架構、分析方法、流程與評估設計。應用程式、雲端 LLM 串接、模型訓練及實驗尚未完成；以下功能與介面均為規劃內容，目前沒有可執行的 App 或實測成效。
 
+## DIC4：OpenSpec 規格與 IEEE 論文草稿
+
+本 repo 由 [lun-09-15/AIoT_Final_Proj](https://github.com/lun-09-15/AIoT_Final_Proj) 複製而來（保留原 commit 紀錄），並新增 DIC4 內容：
+
+| 位置 | 內容 |
+|---|---|
+| [openspec/](openspec/) | OpenSpec 2.0.0 設定與 change `build-energy-detective-agent`：proposal、11 項能力規格、design（9 個設計決策）、tasks（32 項），通過 `openspec validate --strict` |
+| [paper/](paper/) | IEEE conference 論文草稿（LaTeX，可直接上傳 Overleaf）與論點—規格追溯表 |
+
+```bash
+npm i -g @fission-ai/openspec@2.0.0
+openspec validate --all --strict
+openspec show build-energy-detective-agent
+```
+
 ## 專案要解決的問題
 
 家庭用電紀錄通常包含大量時間序列數值。即使有圖表，使用者仍需要判斷比較日期是否合理、資料是否完整，以及用電增加可能代表什麼。
